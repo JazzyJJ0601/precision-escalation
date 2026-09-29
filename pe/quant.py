@@ -14,18 +14,21 @@ def quantize_and_store(weights: np.ndarray,
     """
     Full quantization pipeline: quantize weights into base + residuals.
     
+    Quantizes weights to 2^max_bits levels per group, then encodes
+    as a 2-bit base plus (max_bits - 2) residual bit-planes.
+    
     Args:
         weights: Original weight matrix
         group_size: Group size for scaling
         max_bits: Maximum target precision (default 8)
         
     Returns:
-        Dict with base_2bit, scales, zeros, bit_planes, and metadata
+        Dict with base_2bit, step, min_val, bit_planes, and metadata
     """
     original_shape = weights.shape
     total_elements = original_shape[0] * original_shape[1]
     
-    # Flatten and pad
+    # Flatten and pad to group_size multiple
     flat = weights.ravel().astype(np.float32)
     n_groups = (total_elements + group_size - 1) // group_size
     padded_size = n_groups * group_size
@@ -35,65 +38,49 @@ def quantize_and_store(weights: np.ndarray,
     
     groups = flat.reshape(n_groups, group_size)
     
-    # 2-bit base quantization per group (4 levels: 0, 1, 2, 3)
+    # Per-group min/max for quantization (2^max_bits levels per group)
     group_min = groups.min(axis=1, keepdims=True)
     group_max = groups.max(axis=1, keepdims=True)
     group_range = group_max - group_min
-    group_range[group_range == 0] = 1.0
+    group_range[group_range == 0] = 1.0  # Avoid division by zero
     
+    # Quantization step for full precision
+    n_levels = 1 << max_bits  # 2^max_bits
+    step = group_range / (n_levels - 1)
+    
+    # Scales for 2-bit base (same as group_range / 3)
     scales = group_range / 3.0
-    zeros = group_min
     
-    scaled = (groups - zeros) / scales
-    base_2bit_groups = np.clip(np.round(scaled), 0, 3).astype(np.uint8)
+    # Quantize to max_bits levels (0 to n_levels-1)
+    quantized = np.clip(np.round((groups - group_min) / step), 0, n_levels - 1).astype(np.uint16)
     
-    # Compute residuals (original - base)
-    residuals = groups - (base_2bit_groups.astype(np.float32) * scales + zeros)
+    # Extract 2-bit base (most significant 2 bits)
+    base_2bit = (quantized >> (max_bits - 2)).astype(np.uint8)
     
-    # Encode residuals into bit-planes (signed, two's complement)
-    residual_bits = max_bits - 2  # 6 bits for 8-bit total
+    # Extract residual bits (remaining max_bits - 2 bits)
+    residual_bits = max_bits - 2
+    residual_mask = (1 << residual_bits) - 1
+    residuals = quantized & residual_mask
     
-    # Scale residuals to fit in signed residual_bits range
-    max_abs_residual = np.abs(residuals).max()
-    if max_abs_residual > 0:
-        # Map to signed range [-2^(residual_bits-1), 2^(residual_bits-1)-1]
-        max_signed = (2 ** (residual_bits - 1)) - 1
-        min_signed = -(2 ** (residual_bits - 1))
-        # Scale linearly
-        residuals_scaled = residuals / max_abs_residual * ((max_signed - min_signed) / 2)
-    else:
-        residuals_scaled = residuals.copy()
-    
-    # Round and clip to signed range
-    residuals_int = np.round(residuals_scaled).astype(np.int16)
-    max_signed = (2 ** (residual_bits - 1)) - 1
-    min_signed = -(2 ** (residual_bits - 1))
-    residuals_int = np.clip(residuals_int, min_signed, max_signed)
-    
-    # Encode each bit plane (using two's complement representation)
+    # Encode residuals as bit-planes
     bit_planes = []
     for i in range(residual_bits):
-        # For two's complement, we extract bits directly
-        if i == residual_bits - 1:  # Sign bit
-            # Sign bit: 1 if negative, 0 if positive
-            bit_plane = ((residuals_int < 0).astype(np.int16))
-        else:
-            # Value bits
-            bit_plane = ((np.abs(residuals_int) >> i) & 1)
+        bit_plane = ((residuals >> i) & 1).astype(np.uint8)
         bit_planes.append(bit_plane)
     
     return {
-        'base_2bit': base_2bit_groups,
+        'base_2bit': base_2bit,
+        'step': step,
         'scales': scales,
-        'zeros': zeros,
+        'min_val': group_min,
         'bit_planes': bit_planes,
         'group_size': group_size,
         'n_groups': n_groups,
         'original_shape': original_shape,
         'total_elements': total_elements,
-        'max_abs_residual': max_abs_residual,
         'max_bits': max_bits,
-        'residual_bits': residual_bits
+        'residual_bits': residual_bits,
+        'n_levels': n_levels
     }
 
 
@@ -112,48 +99,29 @@ def reconstruct_from_storage(data: dict, target_bits: int) -> np.ndarray:
         raise ValueError("target_bits must be >= 2")
     
     base_2bit = data['base_2bit']
-    scales = data['scales']
-    zeros = data['zeros']
+    step = data['step']
+    min_val = data['min_val']
     bit_planes = data['bit_planes']
     original_shape = data['original_shape']
-    max_abs_residual = data['max_abs_residual']
-    residual_bits = data['residual_bits']
     total_elements = data['total_elements']
+    residual_bits = data['residual_bits']
     
-    # Base reconstruction
-    reconstructed = base_2bit.astype(np.float32) * scales + zeros
+    # For target_bits: use base + bits_to_use_from_residuals LSB of residual
+    bits_to_use_from_residuals = min(target_bits - 2, residual_bits)
     
-    if target_bits == 2:
-        return reconstructed.ravel()[:total_elements].reshape(original_shape)
-    
-    # Add residual bit-planes
-    bits_to_add = min(target_bits - 2, residual_bits)
-    
-    if bits_to_add <= 0:
-        return reconstructed.ravel()[:total_elements].reshape(original_shape)
-    
-    # Compute residual value from bit planes
-    residual_value = np.zeros_like(reconstructed, dtype=np.int16)
-    
-    max_signed = (2 ** (residual_bits - 1)) - 1
-    min_signed = -(2 ** (residual_bits - 1))
-    
-    for i in range(bits_to_add):
-        bit_val = bit_planes[i].astype(np.int16)
-        if i == residual_bits - 1:  # Sign bit
-            # Apply two's complement: subtract 2^i from sum of other bits
-            # Actually, let's compute directly
-            residual_value = -residual_value  # Sign bit means negative
-        else:
-            residual_value += bit_val * (2 ** i)
-    
-    # Scale back to actual residuals
-    if max_abs_residual > 0:
-        scale_factor = max_abs_residual / ((max_signed - min_signed) / 2)
-        residual_value = residual_value.astype(np.float32) * scale_factor
+    if bits_to_use_from_residuals == 0:
+        # 2-bit: only base
+        quantized = base_2bit.astype(np.uint16) << residual_bits
     else:
-        residual_value = residual_value.astype(np.float32)
+        # Reconstruct using the first bits_to_use_from_residuals bits of residual (LSBs)
+        unsigned = np.zeros_like(base_2bit, dtype=np.uint16)
+        for i in range(bits_to_use_from_residuals):
+            unsigned += bit_planes[i].astype(np.uint16) << i
+        
+        # Combine: base shifted by residual_bits + unsigned (the LSBs of residual)
+        quantized = (base_2bit.astype(np.uint16) << residual_bits) | unsigned
     
-    reconstructed += residual_value
+    # Dequantize to float
+    reconstructed = min_val + quantized.astype(np.float32) * step
     
     return reconstructed.ravel()[:total_elements].reshape(original_shape)
