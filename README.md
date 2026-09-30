@@ -45,6 +45,17 @@ than the random synthetic matrix — 2-bit error is ~36 % vs ~68 %.  This
 is because real weights have structure (clusters, low-rank subspaces) that
 the group-wise quantiser exploits.
 
+## Perplexity
+
+Not yet measured on a real model run. The `pe/eval_ppl.py` script
+loads the local Qwen3-8B checkpoint and evaluates a single quantised
+layer. Run it when the model checkpoint is available:
+
+```bash
+cd repos/precision-escalation
+python pe/eval_ppl.py
+```
+
 ## Architecture
 
 Weights are decomposed into a 2-bit base component (stays in VRAM) and
