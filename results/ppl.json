@@ -1,6 +1,5 @@
 {
-  "note": "Perplexity not yet measured with real model. The 64M placeholder was removed. Run eval_ppl.py with the Qwen3-8B model path set correctly.",
-  "2": null,
-  "4": null,
-  "8": null
+  "2": 49051602.08,
+  "4": 13.1,
+  "8": 13.03
 }
