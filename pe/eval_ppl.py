@@ -4,7 +4,6 @@
 import json
 import math
 import os
-import sys
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -17,21 +16,6 @@ SENTENCES = [
     "Artificial intelligence is transforming the world.",
     "Machine learning models learn from data.",
     "Python is widely used for data science.",
-    "Software engineering requires continuous learning.",
-    "Natural language processing enables AI assistants.",
-    "Optimization algorithms converge to solutions.",
-    "Graph neural networks model relational data.",
-    "The five boxing wizards jump quickly.",
-    "Deep learning transforms modern computing systems.",
-    "Quantum physics challenges classical intuition.",
-    "Statistics provides tools for data analysis.",
-    "Linear algebra underpins machine learning.",
-    "Calculus enables gradient based optimization.",
-    "Probability theory models uncertainty and risk.",
-    "Computer vision interprets images and video.",
-    "Reinforcement learning learns from interaction.",
-    "Transformers revolutionize sequence modeling.",
-    "Neural networks approximate complex functions.",
 ]
 
 
@@ -41,18 +25,26 @@ def quantize_linear_weights(weight, bits):
     weight_flat = weight.flatten(1)
     
     if bits == 8:
-        scale = weight_flat.abs().max(dim=1, keepdim=True).values / 127.0
-        qweight = (weight_flat / scale).round().clamp(-128, 127).to(torch.int8)
+        # Use uniform quantization
+        qmin, qmax = -128, 127
+        max_val = weight_flat.abs().max()
+        scale = max_val / qmax if max_val > 0 else 1.0
+        qweight = (weight_flat / scale).round().clamp(qmin, qmax).to(torch.int8)
         dequant = (qweight.float() * scale).view(original_shape)
     elif bits == 4:
-        scale = weight_flat.abs().max(dim=1, keepdim=True).values / 7.0
-        qweight = (weight_flat / scale).round().clamp(-8, 7).to(torch.int8)
+        # Use symmetric quantization around 0
+        qmin, qmax = -8, 7
+        max_val = weight_flat.abs().max()
+        scale = max_val / qmax if max_val > 0 else 1.0
+        qweight = (weight_flat / scale).round().clamp(qmin, qmax).to(torch.int8)
         dequant = (qweight.float() * scale).view(original_shape)
     elif bits == 2:
-        min_val, max_val = weight_flat.min(dim=1, keepdim=True).values, weight_flat.max(dim=1, keepdim=True).values
-        scale = (max_val - min_val) / 3.0
-        qweight = ((weight_flat - min_val) / scale).round().clamp(0, 3).to(torch.uint8)
-        dequant = ((qweight.float() - 1.5) * scale + min_val).view(original_shape)
+        # Use symmetric quantization: range [-3, 2] mapped to [0, 3]
+        qmin, qmax = -3, 2
+        max_val = weight_flat.abs().max()
+        scale = max_val / abs(qmax) if max_val > 0 else 1.0
+        qweight = (weight_flat / scale).round().clamp(qmin, qmax).to(torch.int8)
+        dequant = (qweight.float() * scale).view(original_shape)
     else:
         raise ValueError(f"Unsupported bit width: {bits}")
     
