@@ -106,21 +106,16 @@ def reconstruct_from_storage(data: dict, target_bits: int) -> np.ndarray:
     total_elements = data['total_elements']
     residual_bits = data['residual_bits']
     
-    # For target_bits: use base + bits_to_use_from_residuals LSB of residual
-    bits_to_use_from_residuals = min(target_bits - 2, residual_bits)
-    
-    if bits_to_use_from_residuals == 0:
-        # 2-bit: only base
-        quantized = base_2bit.astype(np.uint16) << residual_bits
-    else:
-        # Reconstruct using the first bits_to_use_from_residuals bits of residual (LSBs)
-        unsigned = np.zeros_like(base_2bit, dtype=np.uint16)
-        for i in range(bits_to_use_from_residuals):
-            unsigned += bit_planes[i].astype(np.uint16) << i
-        
-        # Combine: base shifted by residual_bits + unsigned (the LSBs of residual)
-        quantized = (base_2bit.astype(np.uint16) << residual_bits) | unsigned
-    
+    # Progressive precision: base (top 2 bits) plus the most significant residual bits first
+    k = min(max(target_bits - 2, 0), residual_bits)
+    quantized = base_2bit.astype(np.uint16) << residual_bits
+    for j in range(k):
+        i = residual_bits - 1 - j  # plane i holds bit i; take MSB first
+        quantized |= bit_planes[i].astype(np.uint16) << i
+    if k < residual_bits:
+        # centre the missing low bits to halve the expected error
+        quantized |= np.uint16(1 << (residual_bits - k - 1))
+
     # Dequantize to float
     reconstructed = min_val + quantized.astype(np.float32) * step
     
