@@ -68,3 +68,8 @@ IO with computation to hide latency.
 
 See [DESIGN.md](DESIGN.md) for full architecture, entropy gate mechanism,
 prefetch strategy, and experiment plan.
+
+
+**Measured status:** Only the FP16 Qwen3-8B baseline is measured (18.43 perplexity); the 2-bit and escalation runs ran out of memory. The method is not evaluated yet.
+
+See [RESULTS.md](RESULTS.md)
