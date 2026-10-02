@@ -1,0 +1,230 @@
+{
+  "setup": {
+    "model": "Qwen3-8B",
+    "group": 128,
+    "dev": "WikiText-2 test windows 1-10",
+    "test": "WikiText-2 test windows 11-40 (x512 tokens)"
+  },
+  "test_ppl": {
+    "bf16": 11.1976,
+    "4bit": 12.0798,
+    "3bit": 16.4365,
+    "2bit": 1059788.625
+  },
+  "2bit_to_4bit": [
+    {
+      "target_share": 0.1,
+      "test_share": 0.12,
+      "entropy_gate_ppl": 394400.1875,
+      "random_ppl_mean": 271678.775,
+      "random_ppl_all": [
+        267162.4375,
+        288119.5312,
+        269488.0,
+        271194.5,
+        262429.4062
+      ]
+    },
+    {
+      "target_share": 0.2,
+      "test_share": 0.235,
+      "entropy_gate_ppl": 115448.5156,
+      "random_ppl_mean": 73832.3344,
+      "random_ppl_all": [
+        73473.1094,
+        71584.6953,
+        75903.9922,
+        75601.7969,
+        72598.0781
+      ]
+    },
+    {
+      "target_share": 0.3,
+      "test_share": 0.336,
+      "entropy_gate_ppl": 37473.6406,
+      "random_ppl_mean": 23251.1269,
+      "random_ppl_all": [
+        24415.7207,
+        23570.1328,
+        22788.5566,
+        23312.4902,
+        22168.7344
+      ]
+    },
+    {
+      "target_share": 0.5,
+      "test_share": 0.533,
+      "entropy_gate_ppl": 3668.033,
+      "random_ppl_mean": 2371.7886,
+      "random_ppl_all": [
+        2272.7068,
+        2232.9634,
+        2138.4624,
+        2746.9153,
+        2467.8953
+      ]
+    }
+  ],
+  "2bit_to_bf16": [
+    {
+      "target_share": 0.1,
+      "test_share": 0.12,
+      "entropy_gate_ppl": 388118.9688,
+      "random_ppl_mean": 272458.0125,
+      "random_ppl_all": [
+        266057.9375,
+        274814.9688,
+        281181.0,
+        263542.7188,
+        276693.4375
+      ]
+    },
+    {
+      "target_share": 0.2,
+      "test_share": 0.235,
+      "entropy_gate_ppl": 113116.7891,
+      "random_ppl_mean": 71497.0641,
+      "random_ppl_all": [
+        76831.6875,
+        70180.5781,
+        67780.9688,
+        72584.0938,
+        70107.9922
+      ]
+    },
+    {
+      "target_share": 0.3,
+      "test_share": 0.336,
+      "entropy_gate_ppl": 36408.7148,
+      "random_ppl_mean": 22826.9305,
+      "random_ppl_all": [
+        23610.5391,
+        22953.1875,
+        23116.3848,
+        20654.9629,
+        23799.5781
+      ]
+    },
+    {
+      "target_share": 0.5,
+      "test_share": 0.533,
+      "entropy_gate_ppl": 3504.9817,
+      "random_ppl_mean": 2282.415,
+      "random_ppl_all": [
+        2235.5757,
+        2432.8362,
+        2256.7373,
+        2197.0481,
+        2289.8777
+      ]
+    }
+  ],
+  "3bit_to_4bit": [
+    {
+      "target_share": 0.1,
+      "test_share": 0.063,
+      "entropy_gate_ppl": 15.7979,
+      "random_ppl_mean": 16.1488,
+      "random_ppl_all": [
+        16.1528,
+        16.1542,
+        16.0751,
+        16.1962,
+        16.1657
+      ]
+    },
+    {
+      "target_share": 0.2,
+      "test_share": 0.138,
+      "entropy_gate_ppl": 15.2177,
+      "random_ppl_mean": 15.7186,
+      "random_ppl_all": [
+        15.7058,
+        15.685,
+        15.7573,
+        15.7068,
+        15.7381
+      ]
+    },
+    {
+      "target_share": 0.3,
+      "test_share": 0.225,
+      "entropy_gate_ppl": 14.6533,
+      "random_ppl_mean": 15.313,
+      "random_ppl_all": [
+        15.1727,
+        15.426,
+        15.3043,
+        15.3468,
+        15.3153
+      ]
+    },
+    {
+      "target_share": 0.5,
+      "test_share": 0.427,
+      "entropy_gate_ppl": 13.6103,
+      "random_ppl_mean": 14.4086,
+      "random_ppl_all": [
+        14.4109,
+        14.4898,
+        14.3241,
+        14.3548,
+        14.4636
+      ]
+    }
+  ],
+  "3bit_to_bf16": [
+    {
+      "target_share": 0.1,
+      "test_share": 0.063,
+      "entropy_gate_ppl": 15.5896,
+      "random_ppl_mean": 16.0638,
+      "random_ppl_all": [
+        16.0663,
+        16.0481,
+        16.0777,
+        16.0133,
+        16.1135
+      ]
+    },
+    {
+      "target_share": 0.2,
+      "test_share": 0.138,
+      "entropy_gate_ppl": 14.8628,
+      "random_ppl_mean": 15.5756,
+      "random_ppl_all": [
+        15.6075,
+        15.6496,
+        15.5405,
+        15.4381,
+        15.6424
+      ]
+    },
+    {
+      "target_share": 0.3,
+      "test_share": 0.225,
+      "entropy_gate_ppl": 14.1662,
+      "random_ppl_mean": 15.0077,
+      "random_ppl_all": [
+        14.906,
+        15.0342,
+        14.9733,
+        15.0209,
+        15.1041
+      ]
+    },
+    {
+      "target_share": 0.5,
+      "test_share": 0.427,
+      "entropy_gate_ppl": 12.902,
+      "random_ppl_mean": 13.9427,
+      "random_ppl_all": [
+        13.9838,
+        13.9356,
+        13.9576,
+        13.958,
+        13.8787
+      ]
+    }
+  ]
+}

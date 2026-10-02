@@ -1,75 +1,71 @@
 # precision-escalation
 
-Layer-wise precision escalation using 2-bit base + residual bit-planes,
-targeting consumer GPUs with limited VRAM.
+Run a small low-bit copy of an LLM for every token, and only escalate to higher precision on
+the tokens where the low-bit model is unsure. The gate is the low-bit model's own predictive
+entropy. The idea for consumer GPUs: keep the low-bit base in VRAM and the residual bits
+(base → 4-bit or → bf16) in system RAM or on NVMe, fetched only for escalated tokens.
 
-Keep a 2-bit base model resident in VRAM; store residual precision data
-(the difference between 2-bit and higher-precision weights) on NVMe or
-system RAM. During inference the entropy gate decides per token whether
-to fetch residuals and recompute at higher precision — typical generation
-only needs high precision for ~20% of tokens.
+Measured on **Qwen3-8B** with a 3-bit base: for the same share of escalated tokens, the
+entropy gate recovers much more quality than escalating at random.
 
-## Usage
+| Escalated tokens | 3-bit → bf16, entropy gate | 3-bit → bf16, random | 3-bit → 4-bit, entropy gate | 3-bit → 4-bit, random |
+|---:|---:|---:|---:|---:|
+| 0% | 16.44 | 16.44 | 16.44 | 16.44 |
+| 6.3% | **15.59** | 16.06 | **15.80** | 16.15 |
+| 13.8% | **14.86** | 15.58 | **15.22** | 15.72 |
+| 22.5% | **14.17** | 15.01 | **14.65** | 15.31 |
+| 42.7% | **12.90** | 13.94 | **13.61** | 14.41 |
+| 100% | 11.20 | 11.20 | 12.08 | 12.08 |
+
+Perplexity, WikiText-2 test windows 11–40 (15,330 predicted tokens). Escalating 22.5% of
+tokens to bf16 recovers 43% of the 3-bit → bf16 gap with the gate, against 27% at random; at
+42.7% it is 68% against 48%.
+
+## What didn't work: a 2-bit base
+
+The original plan was a 2-bit base. With group-128 round-to-nearest, 2-bit Qwen3-8B is broken
+(perplexity over 1,000,000), and its entropy carries no useful signal: the gate did *worse* than
+random at every share (e.g. 3,505 vs 2,282 at 53% escalated to bf16). A broken model is
+confidently wrong exactly where it matters, so "unsure" stops meaning "wrong". The method needs a
+base that is degraded but still sane; 3-bit is. A better 2-bit quantiser (e.g. GPTQ or
+[activation-aware scaling](https://github.com/JazzyJJ0601/activation-aware-quant)) might rescue
+a 2-bit base; not tested here.
+
+## How it was measured
+
+- Weights: all 252 decoder linears quantised with asymmetric RTN, one fp16 scale and zero-point
+  per 128 weights (fake-quantised, evaluated in bf16). bf16, 4-bit, 3-bit and 2-bit are each run
+  once over the same text, keeping every token's log-prob and the base's entropy, so only one
+  copy of the weights is ever on the GPU.
+- The entropy threshold for each target share is set on windows 1–10 (dev) and applied unchanged
+  to windows 11–40 (test). Thresholds transfer imperfectly (a 10% target gives 6.3% on test), so
+  the random baseline escalates exactly the share the gate actually used. Random rows are the
+  mean of 5 draws (spread ≤ 0.6 perplexity; every gate result is outside it).
+- Teacher-forced: an escalated token's prediction comes from the higher-precision model with its
+  own context. In a real decoder that means a recompute at high precision.
+
+## Honest limits
+
+- No speed or memory measurements: the residual fetch/recompute pipeline is not built. Escalating
+  43% of tokens is a lot of fetching, and at 42.7% the 3-bit base + gate (13.61) is still worse
+  than simply running the 4-bit model (12.08), which is only 0.87 GB bigger packed. The result
+  here is that entropy is a good escalation signal, not that the system is faster.
+- One model, WikiText-2 only.
+- Earlier versions of this repo reported an fp16 perplexity of 18.43 on short prompts, a
+  "near-8-bit" 2-bit model in `blog-post.md`, and per-layer error tables. They came from untested
+  code and are withdrawn.
+
+## Reproduce
+
+Needs a CUDA GPU with ~20 GB and a local Qwen3-8B checkpoint (path in `results/qcommon.py`).
 
 ```bash
-# Synthetic test (2048×2048 random matrix, no model required)
-python pe/eval_layer.py
-
-# Real Qwen3-8B layer test (requires safetensors weights on disk)
-python pe/eval_real.py
+python results/run_real.py      # ~5 min on an RTX 3090 Ti, writes results/real.json
+pytest -q tests                 # residual bit-plane store and gate (NumPy prototype in pe/)
 ```
 
-## Results (reconstruction error, Frobenius norm)
+Details: [RESULTS.md](RESULTS.md). Original design: [DESIGN.md](DESIGN.md).
 
-### Synthetic 2048×2048 matrix
+## License
 
-| Bits | Relative Error |
-|------|---------------|
-| 2    | 0.682         |
-| 4    | 0.657         |
-| 6    | 0.557         |
-| 8    | 0.005         |
-
-### Real Qwen3-8B weights (model.layers.10)
-
-| Bits | self_attn.q_proj | mlp.down_proj |
-|------|------------------|---------------|
-| 2    | 0.362            | 0.362         |
-| 3    | 0.181            | 0.181         |
-| 4    | 0.091            | 0.091         |
-| 6    | 0.024            | 0.024         |
-| 8    | 0.005            | 0.005         |
-
-Real Qwen3-8B weights reconstruct much more accurately at low bit-widths
-than the random synthetic matrix — 2-bit error is ~36 % vs ~68 %.  This
-is because real weights have structure (clusters, low-rank subspaces) that
-the group-wise quantiser exploits.
-
-## Perplexity
-
-Not yet measured on a real model run. The `pe/eval_ppl.py` script
-loads the local Qwen3-8B checkpoint and evaluates a single quantised
-layer. Run it when the model checkpoint is available:
-
-```bash
-cd repos/precision-escalation
-python pe/eval_ppl.py
-```
-
-## Architecture
-
-Weights are decomposed into a 2-bit base component (stays in VRAM) and
-residual bit-planes (stored on NVMe, fetched on demand). The entropy gate
-checks output uncertainty from the 2-bit pass and triggers a residual
-fetch when entropy exceeds a threshold.  Double-buffering overlaps NVMe
-IO with computation to hide latency.
-
-## Design
-
-See [DESIGN.md](DESIGN.md) for full architecture, entropy gate mechanism,
-prefetch strategy, and experiment plan.
-
-
-**Measured status:** Only the FP16 Qwen3-8B baseline is measured (18.43 perplexity); the 2-bit and escalation runs ran out of memory. The method is not evaluated yet.
-
-See [RESULTS.md](RESULTS.md)
+MIT

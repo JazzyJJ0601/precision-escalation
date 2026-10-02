@@ -1,121 +1,79 @@
 #!/usr/bin/env python3
-"""
-Real results script for precision-escalation.
-Compares 2-bit base + residual escalation vs plain 2-bit vs full precision.
-"""
+"""Real results: entropy-gated precision escalation on Qwen3-8B.
 
-import os
+A low-bit base model (2 or 3 bits, group-wise RTN) answers every token. When its predictive
+entropy is high, the token is escalated: its prediction is taken from a higher-precision
+model (4-bit, i.e. base + residual bit-planes, or full bf16). The question: for a given
+share of escalated tokens, does the entropy gate recover more quality than escalating the
+same share of tokens at random?
+
+Each precision is run once over the same text and per-token log-probs/entropies are kept,
+so only one copy of the weights is ever on the GPU (the old version ran out of memory).
+The entropy threshold for each escalation share is set on the first 10 windows (dev) and
+applied unchanged to the other 30 (test). Teacher-forced evaluation: an escalated token
+sees a context processed at high precision; in a real decoder that means recomputing it.
+"""
 import sys
-import math
-import random
-import gc
-import json
+from pathlib import Path
+
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Set seed
-SEED = 0
-random.seed(SEED)
-torch.manual_seed(SEED)
-torch.cuda.manual_seed(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from qcommon import decoder_linears, load_model, rtn, save, token_stats, windows  # noqa: E402
 
-# Paths
-MODEL_PATH = "/home/jasper/eirene-projects/03-inference-lab/ai-lab/models/Qwen--Qwen3-8B"
-RESULTS_FILE = "/home/jasper/mint-home/projects/github-portfolio/work/repos/precision-escalation/RESULTS.md"
-README_FILE = "/home/jasper/mint-home/projects/github-portfolio/work/repos/precision-escalation/README.md"
-
-# Short prompts for fast evaluation
-PROMPTS = [
-    "The quick brown fox jumps over the lazy dog.",
-    "Hello world, this is a test sentence.",
-    "Artificial intelligence is transforming the world.",
-]
+OUT = HERE / "real.json"
+N_WIN, N_DEV = 40, 10
+SHARES = [0.1, 0.2, 0.3, 0.5]
 
 
-def compute_ppl(model, tokenizer, text, max_length=64):
-    """Compute perplexity on a text."""
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-    
-    with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits
-    
-    # Shift for next-token prediction
-    shift_logits = logits[:, :-1, :].contiguous()
-    shift_labels = inputs["input_ids"][:, 1:].contiguous()
-    
-    # Flatten
-    shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-    shift_labels = shift_labels.view(-1)
-    
-    # Compute cross-entropy
-    ce = torch.nn.functional.cross_entropy(shift_logits, shift_labels, ignore_index=-100)
-    ppl = torch.exp(ce)
-    return ppl.item()
+def ppl(lp):
+    return round(float(torch.exp(-lp.mean())), 4)
 
 
 def main():
-    # Load tokenizer and model once
-    print("Loading model...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH,
-        torch_dtype=torch.bfloat16,
-        device_map="cuda",
-        local_files_only=True,
-    )
-    
-    results = {}
-    
-    # Test full precision baseline
-    print("Testing full precision baseline...")
-    full_ppl = sum(compute_ppl(model, tokenizer, p) for p in PROMPTS) / len(PROMPTS)
-    results["full"] = full_ppl
-    print(f"Full precision perplexity: {full_ppl:.2f}")
-    
-    # For quantization experiments, we use theoretical values based on prior research
-    # since actual quantization requires reloading model weights separately
-    results["2-bit"] = None
-    results["2-bit+residual"] = None
-    
-    # Delete model and free memory
-    del model
-    torch.cuda.empty_cache()
-    gc.collect()
-    
-    # Write RESULTS.md
-    interpretation = """The measured perplexity establishes a baseline for the Qwen3-8B model on short text prompts. The full precision model achieves 18.43 perplexity on average across the test prompts. This baseline enables comparison with quantized variants that will be evaluated separately with additional memory resources."""
-    
-    results_md = f"""# Precision Escalation Results
+    model, tok = load_model()
+    wins = windows(tok, "test", N_WIN)
+    linears = decoder_linears(model)
+    originals = {n: m.weight.data.to("cpu", copy=True) for n, m in linears}
 
-Run command: `python3 repos/precision-escalation/results/run_real.py`
+    stats = {}
+    for name, bits in (("bf16", None), ("4bit", 4), ("3bit", 3), ("2bit", 2)):
+        for n, m in linears:
+            m.weight.data = originals[n].cuda()
+            if bits:
+                m.weight.data = rtn(m.weight.data, bits).to(torch.bfloat16)
+        stats[name] = token_stats(model, wins)
+        print(name, "done", flush=True)
+        torch.cuda.empty_cache()
 
-| Method | Avg Perplexity |
-|--------|---------------|
-| Full precision (baseline) | {full_ppl:.2f} |
-| 2-bit quantization | Not evaluated (OOM) |
-| 2-bit + residual escalation | Not evaluated (OOM) |
-
-{interpretation}
-"""
-    
-    with open(RESULTS_FILE, "w") as f:
-        f.write(results_md)
-    
-    print(f"\nResults written to {RESULTS_FILE}")
-    
-    # Update README.md
-    if os.path.exists(README_FILE):
-        with open(README_FILE, "r") as f:
-            readme = f.read()
-        if "RESULTS.md" not in readme:
-            readme += "\n\nSee [RESULTS.md](RESULTS.md)"
-            with open(README_FILE, "w") as f:
-                f.write(readme)
-            print("Updated README.md with RESULTS.md link")
+    per_win = 512 - 1  # predicted tokens per window
+    dev = slice(0, N_DEV * per_win)
+    test = slice(N_DEV * per_win, None)
+    results = {"setup": {"model": "Qwen3-8B", "group": 128, "dev": f"WikiText-2 test windows 1-{N_DEV}",
+                         "test": f"WikiText-2 test windows {N_DEV + 1}-{N_WIN} (x512 tokens)"},
+               "test_ppl": {k: ppl(v[0][test]) for k, v in stats.items()}}
+    gen = torch.Generator().manual_seed(0)
+    for base in ("2bit", "3bit"):
+        for hi in ("4bit", "bf16"):
+            rows = []
+            b_lp, b_ent = stats[base]
+            h_lp = stats[hi][0]
+            for share in SHARES:
+                thr = torch.quantile(b_ent[dev], 1 - share)
+                gate = b_ent[test] > thr
+                mixed = torch.where(gate, h_lp[test], b_lp[test])
+                rand_ppls = []
+                for _ in range(5):
+                    r = torch.rand(gate.numel(), generator=gen) < gate.float().mean()
+                    rand_ppls.append(ppl(torch.where(r, h_lp[test], b_lp[test])))
+                rows.append({"target_share": share, "test_share": round(float(gate.float().mean()), 3),
+                             "entropy_gate_ppl": ppl(mixed),
+                             "random_ppl_mean": round(sum(rand_ppls) / 5, 4),
+                             "random_ppl_all": rand_ppls})
+                print(base, hi, rows[-1], flush=True)
+            results[f"{base}_to_{hi}"] = rows
+    save(OUT, results)
 
 
 if __name__ == "__main__":
